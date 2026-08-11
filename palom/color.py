@@ -96,10 +96,54 @@ class PyramidHaxProcessor(HaxProcessor):
             thumbnail_level = len(pyramid) - 1
         super().__init__(pyramid[thumbnail_level], channel_axis=0)
         self.pyramid = pyramid
-   
+
+    def _extract_global_intensity_range(self, low=0.05, high=0.95):
+        
+        '''
+        Was noticing tile differences in stitiched mosaic after color deconvolution. 
+        Think it was due to calculating the range across each block independently,
+        rather than globally across the image. Here, use the low res contrast image to
+        get approximate global range to supply to blockwise deconv 
+        '''
+
+        # get CMYK of low res contrast image
+        cmyk = extract.imagej_rgb2cmyk(self.contrast_img)
+        marker = cmyk[1] + cmyk[2]
+
+        # calculate global range
+        marker = skimage.filters.median(marker, np.ones((3, 3)))
+        global_max = marker.max()
+
+        return (low * global_max, high * global_max)
+
     def get_processed_color(self, level, mode='grayscale', out_dtype=None):
         if mode == 'color':
             return self.pyramid[level]
+
+        if mode == 'ohsu_deconv':
+
+            in_range = self._extract_global_intensity_range(low=0.05, high=0.95)
+            rgb_img = np.moveaxis(self.pyramid[level], 0, 2)
+            # (1) per-pixel: RGB -> (magenta + yellow) marker, drop channel axis
+            marker = da.map_blocks(
+                lambda rgb: (lambda c: c[1] + c[2])(extract.imagej_rgb2cmyk(rgb)),
+                rgb_img, dtype=np.float64, drop_axis=2,
+            )
+            # (2) 3x3 median with a 1-px halo so tile borders are identical
+            marker = da.map_overlap(
+                lambda m: skimage.filters.median(m, np.ones((3, 3))),
+                marker, depth=1, boundary='nearest', dtype=np.float64,
+            )
+            # (3) per-pixel rescale with the GLOBAL window -> uint8 (OHSU dtype)
+            return da.map_blocks(
+                lambda m: skimage.util.img_as_ubyte(
+                    skimage.exposure.rescale_intensity(
+                        m, in_range=in_range, out_range=(0, 1)
+                    )
+                ),
+                marker, dtype=np.uint8,
+            )
+
         rgb_img = np.moveaxis(self.pyramid[level], 0, 2)
         processed = super().get_processed_color(rgb_img, mode=mode)
         if out_dtype is None:
