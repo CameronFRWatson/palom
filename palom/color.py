@@ -37,6 +37,20 @@ class HaxProcessor:
         ))
         return getattr(self, mode_range)
 
+    def find_aec_v2_ym_max(self):
+        """Compute the global Y+M max from the contrast reference image
+        for the ``aec_v2`` mode.
+
+        This is the only image-dependent parameter needed by
+        :meth:`rgb2aec_v2`; the contrast stretch is a fixed linear
+        transform once ``ym_max`` is known.
+        """
+        if hasattr(self, '_aec_v2_ym_max'):
+            return self._aec_v2_ym_max
+        ym_float = extract.compute_ym_float(self.contrast_img)
+        self._aec_v2_ym_max = float(ym_float.max())
+        return self._aec_v2_ym_max
+
     @property
     def contrast_img(self):
         if hasattr(self, '_contrast_img'):
@@ -55,6 +69,9 @@ class HaxProcessor:
     def rgb2aec(self, rgb_img):
         return extract.rgb2aec(rgb_img).astype(np.float32)
 
+    def rgb2aec_v2(self, rgb_img, ym_max=None):
+        return extract.rgb2aec_v2(rgb_img, ym_max=ym_max)
+
     def rgb2dab(self, rgb_img):
         hdx = skimage.color.separate_stains(rgb_img, skimage.color.hdx_from_rgb)
         return hdx[..., 1].astype(np.float32)
@@ -64,7 +81,21 @@ class HaxProcessor:
         return hax[..., 0].astype(np.float32)
 
     def get_processed_color(self, rgb_img, mode='grayscale'):
-        assert mode in ['grayscale', 'hematoxylin', 'aec', 'dab']
+        assert mode in ['grayscale', 'hematoxylin', 'aec', 'dab', 'aec_v2']
+
+        if mode == 'aec_v2':
+            # aec_v2 performs its own normalization (float-to-8bit +
+            # contrast stretch) and returns uint8 directly, so we skip
+            # the contrast-range rescale used by other modes.
+            ym_max = self.find_aec_v2_ym_max()
+            process_func = self.rgb2aec_v2
+            return da.map_blocks(
+                process_func,
+                rgb_img,
+                ym_max=ym_max,
+                dtype=np.uint8,
+                drop_axis=2
+                )
 
         process_func = self.__getattribute__(f"rgb2{mode}")
         intensity_range = self.find_processed_color_contrast_range(mode)
@@ -101,6 +132,10 @@ class PyramidHaxProcessor(HaxProcessor):
         if mode == 'color':
             return self.pyramid[level]
         rgb_img = np.moveaxis(self.pyramid[level], 0, 2)
+        if mode == 'aec_v2':
+            # aec_v2 returns final uint8 [0, 255] directly from the
+            # parent get_processed_color; no (0,1)->out_dtype rescale.
+            return super().get_processed_color(rgb_img, mode='aec_v2')
         processed = super().get_processed_color(rgb_img, mode=mode)
         if out_dtype is None:
             out_dtype = rgb_img.dtype
