@@ -20,7 +20,8 @@ class HaxProcessor:
         )
 
     def find_processed_color_contrast_range(self, mode: str):
-        supported_modes = ['grayscale', 'hematoxylin', 'aec', 'dab']
+        # supported_modes = ['grayscale', 'hematoxylin', 'aec', 'dab']
+        supported_modes = ['grayscale', 'hematoxylin', 'aec', 'dab', 'cmyk_ym']
         assert mode in supported_modes
        
         mode_range = f'_{mode}_range'
@@ -32,9 +33,14 @@ class HaxProcessor:
         process_func = self.__getattribute__(f"rgb2{mode}")
         img = process_func(contrast_ref_img)
 
-        setattr(self, mode_range, (
-            img.min(), img.max()
-        ))
+        if mode == 'cmyk_ym':
+            # Jython-style: 5%-95% of max (not min/max)
+            mx = np.nanmax(img)
+            setattr(self, mode_range, (mx * 0.05, mx * 0.95))
+        else:
+            setattr(self, mode_range, (
+                img.min(), img.max()
+            ))
         return getattr(self, mode_range)
 
     @property
@@ -55,6 +61,11 @@ class HaxProcessor:
     def rgb2aec(self, rgb_img):
         return extract.rgb2aec(rgb_img).astype(np.float32)
 
+    def rgb2cmyk_ym(self, rgb_img):
+        cmyk = extract.imagej_rgb2cmyk(rgb_img)
+        ym = cmyk[1] + cmyk[2]       # M + Y, range [0, 2]
+        return np.clip(ym, 0, 1).astype(np.float32)   # clip to match ByteBlitter
+
     def rgb2dab(self, rgb_img):
         hdx = skimage.color.separate_stains(rgb_img, skimage.color.hdx_from_rgb)
         return hdx[..., 1].astype(np.float32)
@@ -64,7 +75,8 @@ class HaxProcessor:
         return hax[..., 0].astype(np.float32)
 
     def get_processed_color(self, rgb_img, mode='grayscale'):
-        assert mode in ['grayscale', 'hematoxylin', 'aec', 'dab']
+        # assert mode in ['grayscale', 'hematoxylin', 'aec', 'dab']
+        assert mode in ['grayscale', 'hematoxylin', 'aec', 'dab', 'cmyk_ym']
 
         process_func = self.__getattribute__(f"rgb2{mode}")
         intensity_range = self.find_processed_color_contrast_range(mode)
